@@ -1,0 +1,24 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Market automations can be read by anyone and updated (e.g. for likes count increments)
+    match /automations/{automationId} {
+      allow read, write: if true;
+    }
+
+    // Creators list can be read by anyone and updated
+    match /creators/{creatorId} {
+      allow read, write: if true;
+    }
+
+    // Business DNA profiles can be read and written by anyone
+    match /business_dna/{userId} {
+      allow read, write: if true;
+    }
+
+    // Fallback rule for any other collection
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

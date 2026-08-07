@@ -1,0 +1,6 @@
+{
+  "name": "Flowmint",
+  "description": "The premium AI Automation Marketplace for modern businesses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

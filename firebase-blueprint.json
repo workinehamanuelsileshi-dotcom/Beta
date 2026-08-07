@@ -1,0 +1,88 @@
+{
+  "entities": {
+    "Automation": {
+      "title": "Automation",
+      "description": "An automation pipeline available in the marketplace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "problemSolved": { "type": "string" },
+        "valueProp": { "type": "string" },
+        "roi": { "type": "string" },
+        "hoursSaved": { "type": "number" },
+        "monthlyCostReduction": { "type": "number" },
+        "industry": { "type": "string" },
+        "category": { "type": "string" },
+        "platforms": { "type": "array" },
+        "difficulty": { "type": "string" },
+        "implementationTime": { "type": "string" },
+        "price": { "type": "string" },
+        "creatorId": { "type": "string" },
+        "likesCount": { "type": "number" },
+        "workflow": { "type": "array" }
+      },
+      "required": ["id", "name", "roi", "industry", "category", "platforms", "price"]
+    },
+    "Creator": {
+      "title": "Creator",
+      "description": "An automation builder / agency",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "avatar": { "type": "string" },
+        "rating": { "type": "number" },
+        "reviewsCount": { "type": "number" },
+        "verified": { "type": "boolean" },
+        "specialty": { "type": "string" },
+        "completedProjects": { "type": "number" }
+      },
+      "required": ["id", "name", "rating", "reviewsCount", "specialty"]
+    },
+    "BusinessDNA": {
+      "title": "BusinessDNA",
+      "description": "The operational blueprint / calibration data of a company",
+      "type": "object",
+      "properties": {
+        "companyName": { "type": "string" },
+        "website": { "type": "string" },
+        "industry": { "type": "string" },
+        "subIndustry": { "type": "string" },
+        "companySize": { "type": "string" },
+        "country": { "type": "string" },
+        "primaryGoal": { "type": "string" },
+        "revenueStage": { "type": "string" },
+        "growthStage": { "type": "string" },
+        "automationScore": { "type": "number" },
+        "aiReadiness": { "type": "number" },
+        "digitalMaturity": { "type": "string" },
+        "techStack": { "type": "array" },
+        "painPoints": { "type": "array" },
+        "preferredCategories": { "type": "array" },
+        "estimatedROI": { "type": "string" },
+        "recommendedCollections": { "type": "array" },
+        "preferredBudget": { "type": "string" },
+        "preferredCreatorType": { "type": "string" },
+        "preferredTimeline": { "type": "string" },
+        "businessPersonality": { "type": "string" },
+        "goals": { "type": "array" },
+        "maturity": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/automations/{automationId}": {
+      "schema": "Automation",
+      "description": "Marketplace automations collection"
+    },
+    "/creators/{creatorId}": {
+      "schema": "Creator",
+      "description": "Expert builders collection"
+    },
+    "/business_dna/{userId}": {
+      "schema": "BusinessDNA",
+      "description": "User specific business DNA calibration profiles"
+    }
+  }
+}
