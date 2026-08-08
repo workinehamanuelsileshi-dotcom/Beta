@@ -1,85 +1,65 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db, auth } from '../lib/firebase';
 import { 
-  collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, 
+  collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, 
   onSnapshot, query, where, orderBy, serverTimestamp 
 } from 'firebase/firestore';
 import { 
-  Send, Search, Plus, Paperclip, Check, CheckCheck, MoreVertical, 
-  Trash2, Edit2, ExternalLink, Image as ImageIcon, FileText, X, 
-  Sparkles, Shield, User, MessageSquare, ArrowLeft, Clock, Phone, Video
+  Send, Search, Plus, Check, Shield, MessageSquare, ArrowLeft, 
+  Clock, Phone, Video, ExternalLink, AlertTriangle, CreditCard, Lock, CheckCircle2, X
 } from 'lucide-react';
 
-interface ParticipantInfo {
-  name: string;
-  avatar: string;
-  role?: string;
-  isCreator?: boolean;
-}
+export type ConversationStatus = "scoping" | "offer_sent" | "paid_in_escrow" | "delivered" | "approved" | "disputed";
 
-interface Conversation {
+export interface Conversation {
   id: string;
   participantIds: string[];
-  participants: {
-    [uid: string]: ParticipantInfo;
-  };
-  lastMessage?: string;
-  updatedAt?: any;
-  unreadCount?: { [uid: string]: number };
+  participantNames: { [uid: string]: string };
+  participantAvatars: { [uid: string]: string };
   automationId?: string;
-  automationName?: string;
-  automationPrice?: string;
-  projectId?: string;
-  contextType?: 'automation' | 'project' | 'general';
+  automationTitle?: string;
+  status: ConversationStatus;
+  lastMessage: string;
+  lastMessageAt: any;
+  unreadCount: { [uid: string]: number };
 }
 
-interface Message {
+export interface OfferDetail {
+  price: number;
+  scope: string;
+  timelineDays: number;
+  status: "pending" | "accepted" | "declined";
+}
+
+export interface Message {
   id: string;
-  conversationId: string;
   senderId: string;
-  senderName: string;
-  content: string;
+  type: "text" | "offer" | "system";
+  text?: string;
+  content?: string;
+  offer?: OfferDetail;
+  flagged?: boolean;
   createdAt: any;
   readAt?: any;
   deletedAt?: any;
   isEdited?: boolean;
-  attachmentUrl?: string;
-  attachmentName?: string;
 }
 
 interface MessagesPageProps {
   initialCreatorName?: string;
+  initialAutomationId?: string;
+  initialAutomationTitle?: string;
   onOpenAutomation?: (id: string) => void;
 }
 
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
-export default function MessagesPage({ initialCreatorName, onOpenAutomation }: MessagesPageProps) {
-  const currentUserId = auth.currentUser?.uid || 'user_local_demo';
-  const currentUserName = auth.currentUser?.displayName || 'You';
+export default function MessagesPage({ 
+  initialCreatorName, 
+  initialAutomationId, 
+  initialAutomationTitle,
+  onOpenAutomation 
+}: MessagesPageProps) {
+  const currentUserId = auth.currentUser?.uid || 'user_business_demo';
+  const currentUserName = auth.currentUser?.displayName || 'Acme Corp';
   const currentUserAvatar = auth.currentUser?.photoURL || 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?q=80&w=150';
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -87,55 +67,71 @@ export default function MessagesPage({ initialCreatorName, onOpenAutomation }: M
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
-  const [errorState, setErrorState] = useState<string | null>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTabFilter, setActiveTabFilter] = useState<'all' | 'unread' | 'creators' | 'businesses'>('all');
+  const [activeTabFilter, setActiveTabFilter] = useState<'all' | 'unread' | 'active' | 'approved'>('all');
   const [inputText, setInputText] = useState('');
   const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
   const [newChatTargetName, setNewChatTargetName] = useState('');
-  const [selectedAttachment, setSelectedAttachment] = useState<{ name: string; url: string } | null>(null);
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [editText, setEditText] = useState('');
-  const [profileModalUser, setProfileModalUser] = useState<ParticipantInfo | null>(null);
-  const [isMobileShowChat, setIsMobileShowChat] = useState(false);
+
+  // Offer modal state for creators
+  const [isOfferModalOpen, setIsOfferModalOpen] = useState(false);
+  const [offerPrice, setOfferPrice] = useState('1499');
+  const [offerScope, setOfferScope] = useState('Custom pipeline integration, error handling, and webhook deployment.');
+  const [offerTimeline, setOfferTimeline] = useState('5');
+
+  // Stripe Checkout Payment modal state
+  const [checkoutOffer, setCheckoutOffer] = useState<{ id: string; offer: OfferDetail } | null>(null);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+
+  // Dispute reason modal state
+  const [isDisputeModalOpen, setIsDisputeModalOpen] = useState(false);
+  const [disputeReason, setDisputeReason] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Handle URL search params for direct conversation deep link
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const convParam = params.get('conversation');
+    if (convParam) {
+      setActiveConversationId(convParam);
+    }
+  }, []);
 
   // 1. Realtime Conversations Listener
   useEffect(() => {
     setLoadingConversations(true);
-    const q = query(collection(db, 'conversations'), orderBy('updatedAt', 'desc'));
+    const q = query(collection(db, 'conversations'), orderBy('lastMessageAt', 'desc'));
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const list: Conversation[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as Conversation;
-        if (!data.participantIds || data.participantIds.includes(currentUserId) || currentUserId === 'user_local_demo') {
+        if (!data.participantIds || data.participantIds.includes(currentUserId) || currentUserId === 'user_business_demo') {
           list.push({ id: docSnap.id, ...data });
         }
       });
       setConversations(list);
       setLoadingConversations(false);
-      setErrorState(null);
 
-      if (initialCreatorName && list.length > 0 && !activeConversationId) {
+      // If initialCreatorName or initialAutomationId is passed and no active conv, auto-open or create
+      if ((initialCreatorName || initialAutomationId) && list.length > 0 && !activeConversationId) {
         const found = list.find(c => 
-          Object.values(c.participants || {}).some(p => p.name.toLowerCase().includes(initialCreatorName.toLowerCase()))
+          (initialAutomationId && c.automationId === initialAutomationId) ||
+          Object.values(c.participantNames || {}).some(name => name.toLowerCase().includes((initialCreatorName || '').toLowerCase()))
         );
         if (found) {
           setActiveConversationId(found.id);
-          setIsMobileShowChat(true);
         }
       }
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'conversations');
-      setErrorState("Messages couldn't be loaded.");
+      console.error("Error loading conversations:", error);
       setLoadingConversations(false);
     });
 
     return () => unsubscribe();
-  }, [currentUserId, initialCreatorName]);
+  }, [currentUserId, initialCreatorName, initialAutomationId]);
 
   // 2. Realtime Messages Listener for Active Conversation
   useEffect(() => {
@@ -157,209 +153,299 @@ export default function MessagesPage({ initialCreatorName, onOpenAutomation }: M
       });
       setMessages(msgList);
       setLoadingMessages(false);
-
-      msgList.forEach(async (msg) => {
-        if (msg.senderId !== currentUserId && (!msg.readAt)) {
-          try {
-            await updateDoc(doc(db, 'conversations', activeConversationId, 'messages', msg.id), {
-              readAt: new Date().toISOString()
-            });
-          } catch (e) {
-            // ignore
-          }
-        }
-      });
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `conversations/${activeConversationId}/messages`);
+      console.error("Error loading messages:", error);
       setLoadingMessages(false);
     });
 
     return () => unsubscribe();
-  }, [activeConversationId, currentUserId]);
+  }, [activeConversationId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
-  const otherParticipantEntry = activeConversation ? Object.entries(activeConversation.participants || {}).find(([id]) => id !== currentUserId) : null;
-  const defaultOtherParticipant: ParticipantInfo = { name: 'Flowmint Member', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=150', role: 'Verified Creator', isCreator: true };
-  const otherParticipant: ParticipantInfo = otherParticipantEntry ? (otherParticipantEntry[1] as ParticipantInfo) : defaultOtherParticipant;
+  const otherParticipantId = activeConversation?.participantIds?.find(id => id !== currentUserId) || 'creator_expert';
+  const otherParticipantName = activeConversation?.participantNames?.[otherParticipantId] || initialCreatorName || 'Expert Creator';
+  const otherParticipantAvatar = activeConversation?.participantAvatars?.[otherParticipantId] || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=150';
+
+  // Off-platform contact detection regex
+  const checkOffPlatformContent = (text: string): boolean => {
+    const patterns = [
+      /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/, // phone number
+      /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, // email
+      /\b(whatsapp|telegram|signal|skype|call me|text me|direct message|dm me|contact me at)\b/i
+    ];
+    return patterns.some(regex => regex.test(text));
+  };
 
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if ((!inputText.trim() && !selectedAttachment) || !activeConversationId) return;
+    if (!inputText.trim() || !activeConversationId) return;
 
-    const contentText = inputText.trim();
-    const attachment = selectedAttachment;
+    if (activeConversation?.status === 'approved') {
+      alert("This deal is complete. Chat is locked.");
+      return;
+    }
+
+    const text = inputText.trim();
     setInputText('');
-    setSelectedAttachment(null);
 
-    const tempId = 'msg_' + Date.now();
-    const nowIso = new Date().toISOString();
-
-    const newMessagePayload: Message = {
-      id: tempId,
-      conversationId: activeConversationId,
-      senderId: currentUserId,
-      senderName: currentUserName,
-      content: contentText || (attachment ? `Sent attachment: ${attachment.name}` : ''),
-      createdAt: nowIso,
-      attachmentUrl: attachment?.url,
-      attachmentName: attachment?.name
-    };
-
-    setMessages(prev => [...prev, newMessagePayload]);
+    const isFlagged = checkOffPlatformContent(text);
+    const now = serverTimestamp();
+    const msgId = 'msg_' + Date.now();
 
     try {
-      await setDoc(doc(db, 'conversations', activeConversationId, 'messages', tempId), {
-        conversationId: activeConversationId,
+      await setDoc(doc(db, 'conversations', activeConversationId, 'messages', msgId), {
+        id: msgId,
         senderId: currentUserId,
-        senderName: currentUserName,
-        content: newMessagePayload.content,
-        createdAt: nowIso,
-        attachmentUrl: attachment?.url || null,
-        attachmentName: attachment?.name || null
+        type: 'text',
+        text: text,
+        flagged: isFlagged,
+        createdAt: now
       });
 
       await updateDoc(doc(db, 'conversations', activeConversationId), {
-        lastMessage: newMessagePayload.content,
-        updatedAt: nowIso
+        lastMessage: text,
+        lastMessageAt: now
       });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `conversations/${activeConversationId}/messages`);
-      alert("Message couldn't be sent. Try again.");
+    } catch (err) {
+      console.error("Error sending message:", err);
     }
   };
 
-  const handleStartNewChat = async (targetName: string, automationName?: string, automationId?: string) => {
-    if (!targetName.trim()) return;
-
-    const convId = 'conv_' + Date.now();
-    const nowIso = new Date().toISOString();
-    const targetId = 'user_' + targetName.toLowerCase().replace(/\s+/g, '_');
-
-    const newConv: Record<string, any> = {
-      id: convId,
-      participantIds: [currentUserId, targetId],
-      participants: {
-        [currentUserId]: { name: currentUserName, avatar: currentUserAvatar, role: 'Business', isCreator: false },
-        [targetId]: { name: targetName, avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=150', role: 'Creator', isCreator: true }
-      },
-      lastMessage: automationName ? `Inquiry regarding ${automationName}` : 'Started new conversation',
-      updatedAt: nowIso,
-      contextType: automationId ? 'automation' : 'general'
-    };
-    if (automationId) newConv.automationId = automationId;
-    if (automationName) newConv.automationName = automationName;
-
-    try {
-      await setDoc(doc(db, 'conversations', convId), newConv);
-      const initialMsgId = 'msg_' + Date.now();
-      await setDoc(doc(db, 'conversations', convId, 'messages', initialMsgId), {
-        conversationId: convId,
-        senderId: currentUserId,
-        senderName: currentUserName,
-        content: automationName ? `Hi ${targetName}, I'm interested in deploying your automation "${automationName}". Let's discuss details.` : `Hi ${targetName}, let's connect!`,
-        createdAt: nowIso
-      });
-
-      setActiveConversationId(convId);
-      setIsNewChatModalOpen(false);
-      setNewChatTargetName('');
-      setIsMobileShowChat(true);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `conversations/${convId}`);
-      alert("Could not create conversation.");
-    }
-  };
-
-  const handleDeleteMessage = async (msgId: string) => {
+  // Creator sends an offer
+  const handleSendOffer = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!activeConversationId) return;
+
+    const priceNum = parseFloat(offerPrice) || 999;
+    const daysNum = parseInt(offerTimeline) || 5;
+    const msgId = 'msg_' + Date.now();
+    const now = serverTimestamp();
+
+    const offerData: OfferDetail = {
+      price: priceNum,
+      scope: offerScope,
+      timelineDays: daysNum,
+      status: 'pending'
+    };
+
     try {
-      await updateDoc(doc(db, 'conversations', activeConversationId, 'messages', msgId), {
-        deletedAt: new Date().toISOString(),
-        content: 'Message deleted'
+      await setDoc(doc(db, 'conversations', activeConversationId, 'messages', msgId), {
+        id: msgId,
+        senderId: currentUserId,
+        type: 'offer',
+        text: `Proposed Offer: $${priceNum} for ${daysNum} days delivery.`,
+        offer: offerData,
+        flagged: false,
+        createdAt: now
       });
-    } catch (error) {
-      alert("Could not delete message.");
+
+      await updateDoc(doc(db, 'conversations', activeConversationId), {
+        status: 'offer_sent',
+        lastMessage: `Offer sent: $${priceNum} (${daysNum}d)`,
+        lastMessageAt: now
+      });
+
+      setIsOfferModalOpen(false);
+    } catch (err) {
+      console.error("Error sending offer:", err);
     }
   };
 
-  const handleSaveEditMessage = async (msgId: string) => {
-    if (!activeConversationId || !editText.trim()) return;
+  // Business accepts offer & pays via escrow
+  const handleAcceptAndPay = async (msgId: string, offer: OfferDetail) => {
+    setIsProcessingPayment(true);
+    setTimeout(async () => {
+      setIsProcessingPayment(false);
+      setCheckoutOffer(null);
+
+      const now = serverTimestamp();
+      const sysMsgId = 'sys_' + Date.now();
+
+      try {
+        // Update offer status in message
+        await updateDoc(doc(db, 'conversations', activeConversationId!, 'messages', msgId), {
+          'offer.status': 'accepted'
+        });
+
+        // Post system message
+        await setDoc(doc(db, 'conversations', activeConversationId!, 'messages', sysMsgId), {
+          id: sysMsgId,
+          senderId: 'system',
+          type: 'system',
+          text: `🔒 Payment of $${offer.price} received — held securely in Flowmint Escrow until you approve delivery.`,
+          flagged: false,
+          createdAt: now
+        });
+
+        // Update conversation status
+        await updateDoc(doc(db, 'conversations', activeConversationId!), {
+          status: 'paid_in_escrow',
+          lastMessage: `Payment received in escrow ($${offer.price})`,
+          lastMessageAt: now
+        });
+      } catch (err) {
+        console.error("Error processing escrow payment:", err);
+      }
+    }, 1500);
+  };
+
+  // Business declines offer
+  const handleDeclineOffer = async (msgId: string) => {
+    if (!activeConversationId) return;
+    const now = serverTimestamp();
     try {
       await updateDoc(doc(db, 'conversations', activeConversationId, 'messages', msgId), {
-        content: editText.trim(),
-        isEdited: true
+        'offer.status': 'declined'
       });
-      setEditingMessageId(null);
-      setEditText('');
-    } catch (error) {
-      alert("Could not update message.");
+
+      await updateDoc(doc(db, 'conversations', activeConversationId), {
+        status: 'scoping',
+        lastMessage: 'Offer declined — returned to scoping',
+        lastMessageAt: now
+      });
+    } catch (err) {
+      console.error("Error declining offer:", err);
+    }
+  };
+
+  // Creator marks as delivered
+  const handleMarkDelivered = async () => {
+    if (!activeConversationId) return;
+    const now = serverTimestamp();
+    const sysMsgId = 'sys_' + Date.now();
+    try {
+      await setDoc(doc(db, 'conversations', activeConversationId, 'messages', sysMsgId), {
+        id: sysMsgId,
+        senderId: 'system',
+        type: 'system',
+        text: `📦 Creator marked this automation pipeline as Delivered. Please review and approve or report an issue.`,
+        flagged: false,
+        createdAt: now
+      });
+
+      await updateDoc(doc(db, 'conversations', activeConversationId), {
+        status: 'delivered',
+        lastMessage: 'Automation marked as delivered',
+        lastMessageAt: now
+      });
+    } catch (err) {
+      console.error("Error marking delivered:", err);
+    }
+  };
+
+  // Business approves delivery & releases escrow
+  const handleApproveDelivery = async () => {
+    if (!activeConversationId) return;
+    const now = serverTimestamp();
+    const sysMsgId = 'sys_' + Date.now();
+    try {
+      await setDoc(doc(db, 'conversations', activeConversationId, 'messages', sysMsgId), {
+        id: sysMsgId,
+        senderId: 'system',
+        type: 'system',
+        text: `✅ Delivery approved! Escrowed funds released to creator. Deal completed successfully.`,
+        flagged: false,
+        createdAt: now
+      });
+
+      await updateDoc(doc(db, 'conversations', activeConversationId), {
+        status: 'approved',
+        lastMessage: 'Delivery approved & funds released',
+        lastMessageAt: now
+      });
+    } catch (err) {
+      console.error("Error approving delivery:", err);
+    }
+  };
+
+  // Report issue / dispute
+  const handleReportIssue = async () => {
+    if (!activeConversationId || !disputeReason.trim()) return;
+    const now = serverTimestamp();
+    const sysMsgId = 'sys_' + Date.now();
+    try {
+      await setDoc(doc(db, 'conversations', activeConversationId, 'messages', sysMsgId), {
+        id: sysMsgId,
+        senderId: 'system',
+        type: 'system',
+        text: `⚠️ Deal disputed: ${disputeReason}. Under manual review by Flowmint Trust & Safety.`,
+        flagged: true,
+        createdAt: now
+      });
+
+      await updateDoc(doc(db, 'conversations', activeConversationId), {
+        status: 'disputed',
+        lastMessage: 'Dispute filed — under review',
+        lastMessageAt: now
+      });
+      setIsDisputeModalOpen(false);
+      setDisputeReason('');
+    } catch (err) {
+      console.error("Error reporting issue:", err);
+    }
+  };
+
+  // Status badge styling helper
+  const getStatusBadge = (status: ConversationStatus) => {
+    switch (status) {
+      case 'scoping': return <span className="px-2 py-0.5 bg-neutral-100 text-neutral-700 rounded-full text-[10px] font-bold">Scoping</span>;
+      case 'offer_sent': return <span className="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-full text-[10px] font-bold">Offer Sent</span>;
+      case 'paid_in_escrow': return <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-full text-[10px] font-bold">In Escrow 🔒</span>;
+      case 'delivered': return <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full text-[10px] font-bold">Delivered 📦</span>;
+      case 'approved': return <span className="px-2 py-0.5 bg-emerald-50 text-[#0F9D67] border border-emerald-200 rounded-full text-[10px] font-extrabold">Approved ✓</span>;
+      case 'disputed': return <span className="px-2 py-0.5 bg-red-50 text-red-700 border border-red-200 rounded-full text-[10px] font-bold">Disputed ⚠️</span>;
+      default: return null;
     }
   };
 
   const filteredConversations = conversations.filter(c => {
-    const otherEntry = Object.entries(c.participants || {}).find(([id]) => id !== currentUserId);
-    const other = otherEntry ? (otherEntry[1] as ParticipantInfo) : null;
-    const otherName = other ? other.name : '';
-    const matchSearch = otherName.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                        (c.lastMessage && c.lastMessage.toLowerCase().includes(searchQuery.toLowerCase())) ||
-                        (c.automationName && c.automationName.toLowerCase().includes(searchQuery.toLowerCase()));
+    const title = c.automationTitle || '';
+    const otherName = (Object.values(c.participantNames || {}).find(n => n !== currentUserName) as string) || '';
+    const match = title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                  otherName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  (c.lastMessage && c.lastMessage.toLowerCase().includes(searchQuery.toLowerCase()));
+    if (!match) return false;
 
-    if (!matchSearch) return false;
-
-    if (activeTabFilter === 'unread') {
-      return (c.unreadCount?.[currentUserId] || 0) > 0;
-    }
-    if (activeTabFilter === 'creators') {
-      return other && other.isCreator;
-    }
-    if (activeTabFilter === 'businesses') {
-      return other && !other.isCreator;
-    }
+    if (activeTabFilter === 'unread') return (c.unreadCount?.[currentUserId] || 0) > 0;
+    if (activeTabFilter === 'active') return c.status !== 'approved' && c.status !== 'disputed';
+    if (activeTabFilter === 'approved') return c.status === 'approved';
     return true;
   });
 
   return (
-    <div className="bg-white border border-neutral-200 rounded-3xl overflow-hidden flex h-[720px] shadow-sm text-left relative animate-fadeIn font-sans">
+    <div className="bg-[#F6F7FA] min-h-[750px] rounded-3xl border border-[#E6E9EF] overflow-hidden flex shadow-sm text-left relative font-sans">
       
-      {/* 1. SIDEBAR: Conversation List */}
-      <div className={`w-full md:w-[340px] border-r border-neutral-200/90 flex flex-col justify-between shrink-0 bg-white ${isMobileShowChat ? 'hidden md:flex' : 'flex'}`}>
+      {/* 1. LEFT PANEL: Conversation List (320px) */}
+      <div className="w-full md:w-[320px] bg-white border-r border-[#E6E9EF] flex flex-col justify-between shrink-0">
         
-        <div className="p-4 border-b border-neutral-100 space-y-3">
+        <div className="p-4 border-b border-[#E6E9EF] space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-base font-extrabold text-neutral-950 font-sans">Messages</h3>
-            <button
-              onClick={() => setIsNewChatModalOpen(true)}
-              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer flex items-center space-x-1"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>New Chat</span>
-            </button>
+            <h3 className="text-base font-extrabold text-[#0B1220]">Messages</h3>
+            <span className="text-xs font-bold text-[#68707E]">{conversations.length} deals</span>
           </div>
 
           <div className="relative">
-            <Search className="absolute left-3 top-2.5 w-4 h-4 text-neutral-400" />
+            <Search className="absolute left-3 top-2.5 w-4 h-4 text-[#68707E]" />
             <input 
-              type="text" 
+              type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search conversations, creators..."
-              className="w-full pl-9 pr-3 py-2 bg-neutral-50/80 border border-neutral-200/80 rounded-xl text-xs outline-none text-neutral-900 placeholder-neutral-400 focus:bg-white focus:border-blue-500 transition-all"
+              placeholder="Search conversations, automation..."
+              className="w-full pl-9 pr-3 py-2 bg-[#F6F7FA] border border-[#E6E9EF] rounded-xl text-xs outline-none text-[#0B1220] placeholder-[#68707E] focus:bg-white focus:border-[#2F5FF6]"
             />
           </div>
 
           <div className="flex items-center space-x-1 overflow-x-auto scrollbar-none pt-1">
-            {(['all', 'unread', 'creators', 'businesses'] as const).map(tab => (
+            {(['all', 'active', 'approved', 'unread'] as const).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTabFilter(tab)}
-                className={`px-3 py-1 rounded-lg text-[11px] font-bold capitalize transition-colors cursor-pointer ${
-                  activeTabFilter === tab 
-                    ? 'bg-neutral-900 text-white' 
-                    : 'bg-neutral-100 hover:bg-neutral-200 text-neutral-600'
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold capitalize transition-colors cursor-pointer ${
+                  activeTabFilter === tab ? 'bg-[#0B1220] text-white' : 'bg-[#F6F7FA] hover:bg-[#E6E9EF] text-[#68707E]'
                 }`}
               >
                 {tab}
@@ -368,76 +454,59 @@ export default function MessagesPage({ initialCreatorName, onOpenAutomation }: M
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
           {loadingConversations ? (
-            <div className="space-y-3 p-3">
+            <div className="p-4 space-y-3 animate-pulse">
               {[1, 2, 3].map(n => (
-                <div key={n} className="flex items-center space-x-3 animate-pulse">
-                  <div className="w-10 h-10 bg-neutral-200 rounded-full"></div>
+                <div key={n} className="flex items-center space-x-3">
+                  <div className="w-10 h-10 bg-neutral-200 rounded-full" />
                   <div className="flex-1 space-y-2">
-                    <div className="h-3 bg-neutral-200 rounded w-3/4"></div>
-                    <div className="h-2.5 bg-neutral-100 rounded w-1/2"></div>
+                    <div className="h-3 bg-neutral-200 rounded w-3/4" />
+                    <div className="h-2.5 bg-neutral-100 rounded w-1/2" />
                   </div>
                 </div>
               ))}
             </div>
           ) : filteredConversations.length === 0 ? (
-            <div className="text-center py-16 px-4 space-y-3">
-              <div className="w-12 h-12 rounded-2xl bg-neutral-100 text-neutral-400 flex items-center justify-center mx-auto">
-                <MessageSquare className="w-6 h-6" />
-              </div>
-              <h4 className="text-xs font-bold text-neutral-900">Your inbox is quiet.</h4>
-              <p className="text-[11px] text-neutral-500">When businesses or creators contact you, conversations will appear here.</p>
-              <button
-                onClick={() => setIsNewChatModalOpen(true)}
-                className="mt-2 px-4 py-2 bg-neutral-950 text-white rounded-xl text-xs font-bold cursor-pointer"
-              >
-                Start a Conversation
-              </button>
+            <div className="text-center py-16 px-4 space-y-2">
+              <MessageSquare className="w-8 h-8 text-neutral-300 mx-auto" />
+              <h4 className="text-xs font-bold text-[#0B1220]">No conversations yet</h4>
+              <p className="text-[11px] text-[#68707E]">Once you message a creator from a listing, it will show up here.</p>
             </div>
           ) : (
             filteredConversations.map(conv => {
-              const otherEntry = Object.entries(conv.participants || {}).find(([id]) => id !== currentUserId);
-              const other = otherEntry ? (otherEntry[1] as ParticipantInfo) : { name: 'Member', avatar: '' };
               const isActive = conv.id === activeConversationId;
-              const unread = conv.unreadCount?.[currentUserId] || 0;
+              const otherId = conv.participantIds?.find(id => id !== currentUserId) || '';
+              const name = conv.participantNames?.[otherId] || 'Creator';
+              const avatar = conv.participantAvatars?.[otherId] || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=150';
 
               return (
                 <div
                   key={conv.id}
-                  onClick={() => {
-                    setActiveConversationId(conv.id);
-                    setIsMobileShowChat(true);
-                  }}
-                  className={`flex items-start space-x-3 p-3 rounded-2xl cursor-pointer transition-all duration-150 ${
-                    isActive 
-                      ? 'bg-blue-600 text-white shadow-sm' 
-                      : 'hover:bg-neutral-50 text-neutral-900'
+                  onClick={() => setActiveConversationId(conv.id)}
+                  className={`p-3 rounded-2xl cursor-pointer transition-all duration-150 flex items-start space-x-3 ${
+                    isActive ? 'bg-[#2F5FF6] text-white shadow-sm' : 'hover:bg-[#F6F7FA] text-[#0B1220]'
                   }`}
                 >
                   <img 
-                    src={other.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=150"} 
-                    alt={other.name} 
+                    src={avatar} 
+                    alt={name} 
                     className="w-10 h-10 rounded-full object-cover border border-black/10 shrink-0"
                     referrerPolicy="no-referrer"
                   />
-                  <div className="flex-1 min-w-0 text-left">
+                  <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between">
-                      <h4 className={`text-xs font-bold truncate ${isActive ? 'text-white' : 'text-neutral-900'}`}>{other.name}</h4>
-                      {unread > 0 && (
-                        <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-extrabold ${isActive ? 'bg-white text-blue-600' : 'bg-blue-600 text-white'}`}>
-                          {unread}
-                        </span>
-                      )}
+                      <h4 className={`text-xs font-bold truncate ${isActive ? 'text-white' : 'text-[#0B1220]'}`}>{name}</h4>
+                      {getStatusBadge(conv.status)}
                     </div>
-                    <p className={`text-[11px] truncate mt-0.5 font-medium ${isActive ? 'text-blue-100' : 'text-neutral-500'}`}>
-                      {conv.lastMessage || 'No messages yet'}
-                    </p>
-                    {conv.automationName && (
-                      <span className={`inline-block mt-1 px-2 py-0.5 rounded-md text-[9px] font-bold ${isActive ? 'bg-blue-700 text-blue-100' : 'bg-blue-50 text-blue-700'}`}>
-                        ⚡ {conv.automationName}
-                      </span>
+                    {conv.automationTitle && (
+                      <p className={`text-[10px] font-semibold truncate mt-0.5 ${isActive ? 'text-[#EAF0FF]' : 'text-[#2F5FF6]'}`}>
+                        ⚡ {conv.automationTitle}
+                      </p>
                     )}
+                    <p className={`text-[11px] truncate mt-1 ${isActive ? 'text-blue-100' : 'text-[#68707E]'}`}>
+                      {conv.lastMessage || 'Started conversation'}
+                    </p>
                   </div>
                 </div>
               );
@@ -445,172 +514,196 @@ export default function MessagesPage({ initialCreatorName, onOpenAutomation }: M
           )}
         </div>
 
-        <div className="p-3 border-t border-neutral-100 bg-neutral-50/50 text-[10px] text-neutral-400 font-bold text-center">
-          Flowmint Secure Marketplace Messaging
+        <div className="p-3 border-t border-[#E6E9EF] bg-[#F6F7FA] text-[10px] text-[#68707E] font-bold text-center">
+          Flowmint Secure Escrow Chat
         </div>
       </div>
 
-      {/* 2. MAIN CHAT PANEL */}
-      <div className={`flex-1 flex flex-col bg-neutral-50/20 relative ${isMobileShowChat ? 'flex' : 'hidden md:flex'}`}>
-        
-        {!activeConversationId ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
-            <div className="w-16 h-16 rounded-3xl bg-blue-50 text-blue-600 flex items-center justify-center shadow-sm">
-              <MessageSquare className="w-8 h-8" />
+      {/* 2. RIGHT PANEL: Active Thread */}
+      <div className="flex-1 flex flex-col bg-white relative">
+        {!activeConversationId || !activeConversation ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-3">
+            <div className="w-14 h-14 rounded-2xl bg-[#EAF0FF] text-[#2F5FF6] flex items-center justify-center shadow-sm">
+              <MessageSquare className="w-7 h-7" />
             </div>
             <div className="space-y-1 max-w-sm">
-              <h3 className="text-lg font-extrabold text-neutral-950 font-sans">Select a conversation</h3>
-              <p className="text-xs text-neutral-500">Choose a conversation from the left sidebar to continue the discussion or inspect automation context.</p>
+              <h3 className="text-base font-extrabold text-[#0B1220]">Select a conversation to start chatting</h3>
+              <p className="text-xs text-[#68707E]">Inspect escrow status, milestones, and deliverables in real time.</p>
             </div>
           </div>
         ) : (
           <>
-            <div className="px-6 py-3.5 bg-white border-b border-neutral-200/90 flex items-center justify-between shrink-0">
+            {/* Header */}
+            <div className="px-6 py-3.5 bg-white border-b border-[#E6E9EF] flex items-center justify-between shrink-0">
               <div className="flex items-center space-x-3">
-                <button 
-                  onClick={() => setIsMobileShowChat(false)}
-                  className="p-1 -ml-1 mr-1 hover:bg-neutral-100 rounded-xl md:hidden text-neutral-600 cursor-pointer"
-                >
-                  <ArrowLeft className="w-5 h-5" />
-                </button>
                 <img 
-                  src={otherParticipant.avatar} 
-                  alt={otherParticipant.name} 
-                  onClick={() => setProfileModalUser(otherParticipant)}
-                  className="w-9 h-9 rounded-full object-cover border border-neutral-200 cursor-pointer hover:opacity-90 transition-opacity"
+                  src={otherParticipantAvatar} 
+                  alt={otherParticipantName} 
+                  className="w-10 h-10 rounded-full object-cover border border-[#E6E9EF]"
                   referrerPolicy="no-referrer"
                 />
                 <div>
-                  <h4 
-                    onClick={() => setProfileModalUser(otherParticipant)}
-                    className="text-xs font-bold text-neutral-950 font-sans leading-none cursor-pointer hover:underline"
-                  >
-                    {otherParticipant.name}
-                  </h4>
-                  <p className="text-[10px] text-neutral-400 font-semibold mt-0.5">
-                    {otherParticipant.role || 'Creator · Verified'} · Online
-                  </p>
+                  <h4 className="text-xs font-bold text-[#0B1220]">{otherParticipantName}</h4>
+                  <div className="flex items-center space-x-2 mt-0.5">
+                    <span className="text-[10px] text-[#68707E] font-semibold">Verified Creator · Online</span>
+                    {getStatusBadge(activeConversation.status)}
+                  </div>
                 </div>
               </div>
 
+              {/* Creator actions: Send Offer / Mark Delivered */}
               <div className="flex items-center space-x-2">
-                <button 
-                  onClick={() => alert("Starting secure audio/video call...")}
-                  className="p-2 hover:bg-neutral-100 rounded-xl text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer"
-                  title="Video Call"
-                >
-                  <Video className="w-4.5 h-4.5" />
-                </button>
-                <button 
-                  onClick={() => alert("Dialing...")}
-                  className="p-2 hover:bg-neutral-100 rounded-xl text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer"
-                  title="Phone Call"
-                >
-                  <Phone className="w-4.5 h-4.5" />
-                </button>
+                {activeConversation.status === 'scoping' && (
+                  <button
+                    onClick={() => setIsOfferModalOpen(true)}
+                    className="px-3.5 py-2 bg-[#2F5FF6] hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-sm cursor-pointer flex items-center space-x-1"
+                  >
+                    <CreditCard className="w-3.5 h-3.5" />
+                    <span>Send Offer</span>
+                  </button>
+                )}
+
+                {activeConversation.status === 'paid_in_escrow' && (
+                  <button
+                    onClick={handleMarkDelivered}
+                    className="px-3.5 py-2 bg-[#0F9D67] hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm cursor-pointer flex items-center space-x-1"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Mark as Delivered</span>
+                  </button>
+                )}
               </div>
             </div>
 
-            {activeConversation?.automationName && (
-              <div className="mx-6 mt-4 p-3.5 bg-white border border-blue-100 rounded-2xl shadow-sm flex items-center justify-between shrink-0">
+            {/* Linked Automation Banner */}
+            {activeConversation.automationTitle && (
+              <div className="mx-6 mt-4 p-3 bg-[#F6F7FA] border border-[#E6E9EF] rounded-2xl flex items-center justify-between shrink-0">
                 <div className="flex items-center space-x-3">
-                  <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-xs shadow-sm">
+                  <div className="w-8 h-8 rounded-xl bg-[#2F5FF6] text-white flex items-center justify-center font-bold text-xs">
                     ⚡
                   </div>
                   <div>
-                    <h5 className="text-xs font-bold text-neutral-950">{activeConversation.automationName}</h5>
-                    <p className="text-[10px] text-neutral-500 font-medium">Flowmint Marketplace Automation</p>
+                    <h5 className="text-xs font-bold text-[#0B1220]">Re: {activeConversation.automationTitle}</h5>
+                    <p className="text-[10px] text-[#68707E]">Flowmint Marketplace Automation Pipeline</p>
                   </div>
                 </div>
                 {activeConversation.automationId && onOpenAutomation && (
                   <button
                     onClick={() => onOpenAutomation(activeConversation.automationId!)}
-                    className="px-3 py-1.5 bg-neutral-950 hover:bg-neutral-800 text-white text-[11px] font-bold rounded-xl cursor-pointer flex items-center space-x-1"
+                    className="px-3 py-1.5 bg-white hover:bg-neutral-100 border border-[#E6E9EF] text-[#0B1220] text-[11px] font-bold rounded-xl cursor-pointer flex items-center space-x-1 shadow-xs"
                   >
-                    <span>View automation</span>
+                    <span>View listing</span>
                     <ExternalLink className="w-3 h-3" />
                   </button>
                 )}
               </div>
             )}
 
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            {/* Messages Scroll Area */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-[#F6F7FA]/30">
               {loadingMessages ? (
-                <div className="space-y-4">
-                  {[1, 2, 3].map(n => (
-                    <div key={n} className={`flex ${n % 2 === 0 ? 'justify-end' : 'justify-start'} animate-pulse`}>
-                      <div className="w-48 h-10 bg-neutral-200 rounded-2xl"></div>
-                    </div>
+                <div className="space-y-3 animate-pulse">
+                  {[1, 2].map(n => (
+                    <div key={n} className="w-48 h-10 bg-neutral-200 rounded-xl" />
                   ))}
                 </div>
               ) : messages.length === 0 ? (
-                <div className="text-center py-12 text-neutral-400 text-xs font-medium">
-                  No messages yet. Send a message to start the collaboration.
+                <div className="text-center py-12 text-xs text-[#68707E]">
+                  No messages yet. Send a message to start scoping this automation!
                 </div>
               ) : (
-                messages.map(msg => {
+                messages.map((msg, index) => {
                   const isOwn = msg.senderId === currentUserId;
-                  const isDeleted = Boolean(msg.deletedAt);
+                  const isSystem = msg.type === 'system';
+                  const isOffer = msg.type === 'offer';
 
-                  return (
-                    <div key={msg.id} className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} group animate-fadeIn`}>
-                      <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-xs leading-relaxed shadow-sm relative ${
-                        isOwn 
-                          ? 'bg-blue-600 text-white rounded-br-xs' 
-                          : 'bg-white text-neutral-900 border border-neutral-200/80 rounded-bl-xs'
-                      }`}>
-                        {editingMessageId === msg.id ? (
-                          <div className="space-y-2">
-                            <input 
-                              type="text" 
-                              value={editText}
-                              onChange={(e) => setEditText(e.target.value)}
-                              className="w-full px-2 py-1 bg-white text-neutral-900 rounded text-xs outline-none"
-                            />
-                            <div className="flex justify-end space-x-1">
-                              <button onClick={() => setEditingMessageId(null)} className="px-2 py-0.5 bg-neutral-200 text-neutral-800 rounded text-[10px]">Cancel</button>
-                              <button onClick={() => handleSaveEditMessage(msg.id)} className="px-2 py-0.5 bg-neutral-900 text-white rounded text-[10px]">Save</button>
+                  if (isSystem) {
+                    return (
+                      <div key={msg.id} className="flex justify-center my-3">
+                        <div className="px-4 py-2 bg-blue-50 border border-blue-100 text-blue-800 rounded-2xl text-xs font-semibold text-center max-w-md shadow-xs">
+                          {msg.text}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (isOffer && msg.offer) {
+                    const offer = msg.offer;
+                    const isPending = offer.status === 'pending';
+
+                    return (
+                      <div key={msg.id} className="flex justify-center my-4">
+                        <div className="w-full max-w-md bg-white border-2 border-[#2F5FF6] rounded-3xl p-5 shadow-sm space-y-4">
+                          <div className="flex items-center justify-between border-b border-[#E6E9EF] pb-3">
+                            <div className="flex items-center space-x-2">
+                              <div className="w-8 h-8 rounded-full bg-[#EAF0FF] text-[#2F5FF6] flex items-center justify-center font-bold">
+                                💼
+                              </div>
+                              <div>
+                                <h4 className="text-xs font-extrabold text-[#0B1220]">Professional Services Offer</h4>
+                                <p className="text-[10px] text-[#68707E]">Escrow Protected Milestone</p>
+                              </div>
+                            </div>
+                            <span className="text-lg font-black text-[#0B1220] font-mono">${offer.price}</span>
+                          </div>
+
+                          <div className="space-y-2 text-xs">
+                            <div>
+                              <span className="font-bold text-[#68707E] text-[10px] uppercase">Scope of Work</span>
+                              <p className="text-[#0B1220] font-medium mt-0.5">{offer.scope}</p>
+                            </div>
+                            <div className="flex items-center space-x-4 pt-1 text-[#68707E]">
+                              <span className="flex items-center space-x-1">
+                                <Clock className="w-3.5 h-3.5 text-[#2F5FF6]" />
+                                <span>Timeline: <strong>{offer.timelineDays} days</strong></span>
+                              </span>
                             </div>
                           </div>
-                        ) : (
-                          <>
-                            <p className={isDeleted ? 'italic text-neutral-400' : ''}>{msg.content}</p>
-                            {msg.attachmentName && (
-                              <div className="mt-2 p-2 bg-black/10 rounded-xl flex items-center space-x-2 text-[11px]">
-                                <FileText className="w-4 h-4" />
-                                <span className="underline font-semibold">{msg.attachmentName}</span>
-                              </div>
-                            )}
-                          </>
-                        )}
 
-                        {isOwn && !isDeleted && editingMessageId !== msg.id && (
-                          <div className="absolute right-2 -bottom-6 hidden group-hover:flex items-center space-x-1 bg-white border border-neutral-200 rounded-lg shadow-sm px-1.5 py-0.5 text-neutral-700 z-10">
-                            <button 
-                              onClick={() => { setEditingMessageId(msg.id); setEditText(msg.content); }}
-                              className="p-1 hover:bg-neutral-100 rounded cursor-pointer"
-                              title="Edit"
-                            >
-                              <Edit2 className="w-3 h-3 text-neutral-500" />
-                            </button>
-                            <button 
-                              onClick={() => handleDeleteMessage(msg.id)}
-                              className="p-1 hover:bg-red-50 rounded cursor-pointer"
-                              title="Delete"
-                            >
-                              <Trash2 className="w-3 h-3 text-red-500" />
-                            </button>
-                          </div>
-                        )}
+                          {/* Action buttons for Business */}
+                          {isPending && activeConversation.status === 'offer_sent' && !isOwn ? (
+                            <div className="flex items-center space-x-2 pt-2 border-t border-[#E6E9EF]">
+                              <button
+                                onClick={() => setCheckoutOffer({ id: msg.id, offer })}
+                                className="flex-1 py-2.5 bg-[#2F5FF6] hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-sm cursor-pointer flex items-center justify-center space-x-1.5"
+                              >
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Accept & Pay (${offer.price})</span>
+                              </button>
+                              <button
+                                onClick={() => handleDeclineOffer(msg.id)}
+                                className="px-4 py-2.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded-xl text-xs font-bold cursor-pointer"
+                              >
+                                Decline
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="pt-2 border-t border-[#E6E9EF] text-center text-xs font-bold text-[#68707E]">
+                              Offer Status: <span className="capitalize text-[#2F5FF6]">{offer.status}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div key={msg.id} className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} space-y-1`}>
+                      <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-xs leading-relaxed shadow-xs ${
+                        isOwn 
+                          ? 'bg-[#2F5FF6] text-white rounded-br-xs' 
+                          : 'bg-white text-[#0B1220] border border-[#E6E9EF] rounded-bl-xs'
+                      }`}>
+                        <p>{msg.text || msg.content}</p>
                       </div>
 
-                      <div className="flex items-center space-x-1.5 mt-1 px-1 text-[10px] text-neutral-400 font-semibold">
-                        <span>{new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        {msg.isEdited && <span className="italic">(edited)</span>}
-                        {isOwn && (
-                          <span>{msg.readAt ? '✓✓ Read' : '✓ Sent'}</span>
-                        )}
-                      </div>
+                      {/* Off-platform contact detection warning strip */}
+                      {msg.flagged && (
+                        <div className="flex items-center space-x-1.5 px-3 py-1 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-[10px] font-bold max-w-md">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <span>For your protection, keep this deal on Flowmint until it's complete.</span>
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -618,127 +711,239 @@ export default function MessagesPage({ initialCreatorName, onOpenAutomation }: M
               <div ref={messagesEndRef} />
             </div>
 
-            <form onSubmit={handleSendMessage} className="p-4 bg-white border-t border-neutral-200/90 shrink-0 space-y-2">
-              {selectedAttachment && (
-                <div className="flex items-center justify-between px-3 py-1.5 bg-neutral-100 rounded-xl text-xs">
-                  <div className="flex items-center space-x-2">
-                    <FileText className="w-4 h-4 text-blue-600" />
-                    <span className="font-bold text-neutral-800 truncate max-w-xs">{selectedAttachment.name}</span>
-                  </div>
-                  <button type="button" onClick={() => setSelectedAttachment(null)} className="text-neutral-400 hover:text-neutral-700">
-                    <X className="w-4 h-4" />
+            {/* Delivery Approval Buttons for Business when delivered */}
+            {activeConversation.status === 'delivered' && (
+              <div className="p-4 bg-indigo-50/70 border-t border-indigo-100 flex items-center justify-between shrink-0">
+                <div className="flex items-center space-x-2">
+                  <span className="text-xs font-extrabold text-indigo-900">Creator has marked this project as delivered.</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={handleApproveDelivery}
+                    className="px-4 py-2 bg-[#0F9D67] hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm cursor-pointer"
+                  >
+                    Approve & Release Payment ✓
+                  </button>
+                  <button
+                    onClick={() => setIsDisputeModalOpen(true)}
+                    className="px-3 py-2 bg-white hover:bg-red-50 text-red-600 border border-red-200 rounded-xl text-xs font-bold cursor-pointer"
+                  >
+                    Report an Issue
                   </button>
                 </div>
-              )}
+              </div>
+            )}
 
-              <div className="flex items-center space-x-2">
-                <label className="p-2.5 hover:bg-neutral-100 text-neutral-500 rounded-xl cursor-pointer transition-colors">
-                  <Paperclip className="w-4.5 h-4.5" />
+            {/* Input Bar */}
+            <form onSubmit={handleSendMessage} className="p-4 bg-white border-t border-[#E6E9EF] flex items-center space-x-2 shrink-0">
+              {activeConversation.status === 'approved' ? (
+                <div className="w-full py-3 bg-[#F6F7FA] border border-[#E6E9EF] rounded-2xl text-center text-xs font-bold text-[#68707E]">
+                  This deal is complete. Chat is locked.
+                </div>
+              ) : (
+                <>
                   <input 
-                    type="file" 
-                    className="hidden" 
-                    onChange={(e) => {
-                      if (e.target.files?.[0]) {
-                        const file = e.target.files[0];
-                        setSelectedAttachment({ name: file.name, url: URL.createObjectURL(file) });
+                    type="text"
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
                       }
                     }}
+                    placeholder="Write a message... (Press Enter to send)"
+                    className="flex-1 px-4 py-3 bg-[#F6F7FA] border border-[#E6E9EF] rounded-2xl text-xs outline-none text-[#0B1220] placeholder-[#68707E] focus:bg-white focus:border-[#2F5FF6]"
                   />
-                </label>
-
-                <input 
-                  type="text" 
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                  placeholder="Write a message... (Press Enter to send)"
-                  className="flex-1 px-4 py-2.5 bg-neutral-50 border border-neutral-200/80 rounded-2xl text-xs outline-none text-neutral-900 placeholder-neutral-400 focus:bg-white focus:border-blue-500 transition-all"
-                />
-
-                <button 
-                  type="submit"
-                  disabled={!inputText.trim() && !selectedAttachment}
-                  className="p-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-neutral-200 text-white rounded-2xl transition-all cursor-pointer shadow-sm disabled:cursor-not-allowed"
-                >
-                  <Send className="w-4.5 h-4.5" />
-                </button>
-              </div>
+                  <button
+                    type="submit"
+                    disabled={!inputText.trim()}
+                    className="p-3 bg-[#2F5FF6] hover:bg-blue-700 disabled:bg-neutral-200 text-white rounded-2xl transition-all cursor-pointer shadow-sm disabled:cursor-not-allowed"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             </form>
           </>
         )}
       </div>
 
-      {/* 3. NEW CHAT MODAL */}
-      {isNewChatModalOpen && (
+      {/* 3. SEND OFFER MODAL (Creator) */}
+      {isOfferModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-5 shadow-xl border border-neutral-200 animate-fadeIn text-left">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-xl border border-[#E6E9EF] text-left animate-fadeIn">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-extrabold text-neutral-950">Start New Message</h3>
-              <button onClick={() => setIsNewChatModalOpen(false)} className="p-1 hover:bg-neutral-100 rounded-xl text-neutral-500">
+              <h3 className="text-base font-extrabold text-[#0B1220]">Send Professional Offer</h3>
+              <button onClick={() => setIsOfferModalOpen(false)} className="p-1 hover:bg-neutral-100 rounded-xl text-neutral-500">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
+            <form onSubmit={handleSendOffer} className="space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-[#0B1220]">Total Price (USD)</label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-2.5 text-[#68707E] font-bold text-xs">$</span>
+                  <input 
+                    type="number"
+                    value={offerPrice}
+                    onChange={(e) => setOfferPrice(e.target.value)}
+                    className="w-full pl-8 pr-3.5 py-2.5 bg-[#F6F7FA] border border-[#E6E9EF] rounded-xl text-xs font-mono font-bold text-[#0B1220] outline-none focus:border-[#2F5FF6]"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-[#0B1220]">Scope Description</label>
+                <textarea 
+                  value={offerScope}
+                  onChange={(e) => setOfferScope(e.target.value)}
+                  rows={3}
+                  className="w-full px-3.5 py-2.5 bg-[#F6F7FA] border border-[#E6E9EF] rounded-xl text-xs text-[#0B1220] outline-none focus:border-[#2F5FF6]"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-[#0B1220]">Timeline (Days)</label>
+                <input 
+                  type="number"
+                  value={offerTimeline}
+                  onChange={(e) => setOfferTimeline(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-[#F6F7FA] border border-[#E6E9EF] rounded-xl text-xs text-[#0B1220] outline-none focus:border-[#2F5FF6]"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsOfferModalOpen(false)}
+                  className="px-4 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-bold rounded-xl cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-[#2F5FF6] hover:bg-blue-700 text-white text-xs font-bold rounded-xl cursor-pointer shadow-sm"
+                >
+                  Send Offer
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 4. STRIPE CHECKOUT / ESCROW PAYMENT MODAL */}
+      {checkoutOffer && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl border border-[#E6E9EF] text-left animate-fadeIn">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <div className="w-8 h-8 rounded-xl bg-blue-50 text-[#2F5FF6] flex items-center justify-center font-bold">
+                  🔒
+                </div>
+                <h3 className="text-base font-extrabold text-[#0B1220]">Flowmint Escrow Checkout</h3>
+              </div>
+              <button onClick={() => setCheckoutOffer(null)} className="p-1 hover:bg-neutral-100 rounded-xl text-neutral-500">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 bg-[#F6F7FA] rounded-2xl border border-[#E6E9EF] space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="text-[#68707E]">Milestone Amount</span>
+                <span className="font-bold text-[#0B1220] font-mono">${checkoutOffer.offer.price} USD</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-[#68707E]">Escrow Protection Fee</span>
+                <span className="font-bold text-[#0F9D67]">FREE (Included)</span>
+              </div>
+              <div className="pt-2 border-t border-[#E6E9EF] flex justify-between text-sm font-extrabold">
+                <span className="text-[#0B1220]">Total Due Today</span>
+                <span className="text-[#2F5FF6] font-mono">${checkoutOffer.offer.price} USD</span>
+              </div>
+            </div>
+
             <div className="space-y-3">
-              <label className="text-xs font-bold text-neutral-700">Creator or Member Name</label>
-              <input 
-                type="text" 
-                value={newChatTargetName}
-                onChange={(e) => setNewChatTargetName(e.target.value)}
-                placeholder="e.g. Northbeam Studio, Fielded, Ledger Labs..."
-                className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-xs outline-none text-neutral-900 focus:border-blue-500"
-              />
+              <label className="text-xs font-bold text-[#0B1220]">Payment Method (Stripe Test Mode)</label>
+              <div className="p-3 border border-[#2F5FF6] bg-blue-50/50 rounded-xl flex items-center space-x-3">
+                <CreditCard className="w-5 h-5 text-[#2F5FF6]" />
+                <div className="text-xs">
+                  <p className="font-bold text-[#0B1220]">Visa ending in 4242</p>
+                  <p className="text-[#68707E]">Expires 12/28 · Secure 256-bit SSL</p>
+                </div>
+              </div>
             </div>
 
             <div className="flex justify-end space-x-2 pt-2">
-              <button 
-                onClick={() => setIsNewChatModalOpen(false)}
-                className="px-4 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-bold rounded-xl cursor-pointer"
+              <button
+                onClick={() => setCheckoutOffer(null)}
+                className="px-4 py-2.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-bold rounded-xl cursor-pointer"
               >
                 Cancel
               </button>
-              <button 
-                onClick={() => handleStartNewChat(newChatTargetName)}
-                disabled={!newChatTargetName.trim()}
-                className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-neutral-200 text-white text-xs font-bold rounded-xl cursor-pointer shadow-sm"
+              <button
+                onClick={() => handleAcceptAndPay(checkoutOffer.id, checkoutOffer.offer)}
+                disabled={isProcessingPayment}
+                className="px-6 py-2.5 bg-[#2F5FF6] hover:bg-blue-700 disabled:bg-neutral-300 text-white text-xs font-bold rounded-xl cursor-pointer shadow-md flex items-center space-x-2"
               >
-                Open Chat
+                {isProcessingPayment ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Processing Escrow...</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Pay ${checkoutOffer.offer.price} into Escrow</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* 4. PROFILE QUICK VIEW MODAL */}
-      {profileModalUser && (
+      {/* 5. DISPUTE MODAL */}
+      {isDisputeModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-xl border border-neutral-200 animate-fadeIn text-center relative">
-            <button onClick={() => setProfileModalUser(null)} className="absolute top-4 right-4 p-1 hover:bg-neutral-100 rounded-xl text-neutral-500">
-              <X className="w-5 h-5" />
-            </button>
-            <img 
-              src={profileModalUser.avatar} 
-              alt={profileModalUser.name} 
-              className="w-20 h-20 rounded-full object-cover mx-auto border-2 border-blue-600 shadow-md"
-              referrerPolicy="no-referrer"
-            />
-            <div className="space-y-1">
-              <h4 className="text-base font-extrabold text-neutral-950">{profileModalUser.name}</h4>
-              <p className="text-xs font-bold text-blue-600">{profileModalUser.role || 'Verified Creator'}</p>
-              <p className="text-[11px] text-neutral-500 px-4 pt-1">Flowmint Verified AI Automation Creator and Software Partner.</p>
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-xl border border-[#E6E9EF] text-left animate-fadeIn">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-extrabold text-red-600">Report an Issue / Dispute</h3>
+              <button onClick={() => setIsDisputeModalOpen(false)} className="p-1 hover:bg-neutral-100 rounded-xl text-neutral-500">
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <div className="pt-2">
-              <button 
-                onClick={() => setProfileModalUser(null)}
-                className="w-full py-2.5 bg-neutral-950 hover:bg-neutral-800 text-white text-xs font-bold rounded-xl cursor-pointer"
+            <p className="text-xs text-[#68707E]">
+              If the delivery does not meet the agreed scope, you can open a dispute. Funds will remain secured in escrow while Flowmint support reviews the conversation.
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-[#0B1220]">Reason for dispute</label>
+              <textarea 
+                value={disputeReason}
+                onChange={(e) => setDisputeReason(e.target.value)}
+                placeholder="Describe what is missing or incorrect..."
+                rows={4}
+                className="w-full px-3.5 py-2.5 bg-[#F6F7FA] border border-[#E6E9EF] rounded-xl text-xs text-[#0B1220] outline-none focus:border-red-500"
+              />
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                onClick={() => setIsDisputeModalOpen(false)}
+                className="px-4 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-bold rounded-xl cursor-pointer"
               >
-                Close Profile
+                Cancel
+              </button>
+              <button
+                onClick={handleReportIssue}
+                disabled={!disputeReason.trim()}
+                className="px-5 py-2 bg-red-600 hover:bg-red-700 disabled:bg-neutral-200 text-white text-xs font-bold rounded-xl cursor-pointer shadow-sm"
+              >
+                Submit Dispute
               </button>
             </div>
           </div>
